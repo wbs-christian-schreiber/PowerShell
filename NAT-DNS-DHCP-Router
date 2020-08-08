@@ -1,0 +1,50 @@
+Function Customize.Server {Set-WinUserLanguageList -LanguageList "DE-DE" -Force; Set-TimeZone -Id "W. Europe Standard Time"; Set-Volume -DriveLetter C -NewFileSystemLabel "SYSTEM"}
+Function Autostart.PowerShellServerCore {Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\' -Name Shell -Value 'powershell.exe'}
+Function Set.Pagefile {
+    Get-WmiObject Win32_ComputerSystem -EnableAllPrivileges | ForEach-Object {$_.AutomaticManagedPagefile = $False; $_.Put()}
+    Get-WmiObject -Query "Select * From Win32_PageFileSetting Where Name like '%pagefile.sys'" | ForEach-Object {$_.InitialSize = "2048"; $_.MaximumSize = "2048"; $_.Put()}}
+Function Rename.NIC {    
+    Get-NetAdapter | Where-Object {$_.MacAddress -eq "00-00-00-00-00-01"} | Rename-NetAdapter -NewName "Intern-NIC"
+    Get-NetAdapter | Where-Object {$_.MacAddress -eq "00-00-00-00-00-02"} | Rename-NetAdapter -NewName "Extern-NIC"}
+Function Set.IPAddress {
+    New-NetIPAddress –InterfaceAlias "Intern-NIC"-AddressFamily IPv4 -IPAddress "10.0.0.1" -PrefixLength "24"
+    Set-DnsClientServerAddress –InterfaceAlias "Intern-NIC" -ServerAddresses "10.0.0.1"
+    Set-DnsClient –InterfaceAlias "Intern-NIC" -ConnectionSpecificSuffix "my.corp" -RegisterThisConnectionsAddress $true -UseSuffixWhenRegistering $True}
+Function Disable.IPv6 {Get-NetAdapter | ForEach-Object {Disable-NetAdapterBinding –InterfaceAlias $_.Name –ComponentID ms_tcpip6}}
+Function Disable.NetBios {Get-WmiObject Win32_NetworkAdapterConfiguration | ForEach-Object {$_.SetTCPIPNetBios(2)}}
+Function Disable.WINS {Get-WmiObject -List Win32_NetworkAdapterConfiguration | ForEach-Object {$_.EnableWins($false,$false)}}
+Function Update.NTP {W32tm /Config /SyncFromFlags:Manual /ManualPeerlist:"0.de.pool.ntp.org, 1.de.pool.ntp.org, 2.de.pool.ntp.org, 3.de.pool.ntp.org" /Reliable:YES /Update}
+Function Disable.Telemetry {New-ItemProperty -Type DWord -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -value "0"}
+Function Install.ServerFeatures {Install-WindowsFeature -Name DNS, DHCP, Routing -IncludeAllSubFeature -IncludeManagementTools}
+Function Rename.Server {Rename-Computer -NewName "Gateway" -LocalCredential Administrator -PassThru; Restart-Computer}
+Function Config.DNS {
+    Add-DNSServerPrimaryZone -Name "my.corp" -ZoneFile "my.corp.DNS" -DynamicUpdate NonSecureAndSecure
+    Add-DNSServerPrimaryZone -NetworkID "10.0.0.0/24" -ZoneFile "0.0.10.in-addr.arpa.dns"
+    Add-DNSServerForwarder -IPAddress "1.1.1.1" -PassThru
+    Add-DNSServerResourceRecord -ZoneName "my.corp" -A -Name "Gateway" -AllowUpdateAny -IPv4Address "10.0.0.1" -TimeToLive "01:00:00" -AgeRecord
+    Restart-Service dns
+    Add-DNSServerResourceRecord -Name "1" -Ptr -ZoneName "0.0.10.in-addr.arpa" -AllowUpdateAny -PtrDomainName "Gateway.my.corp"
+    Set-DnsClientServerAddress –InterfaceAlias "Intern-NIC" -ServerAddresses "Extern-NIC"}
+Function Config.DHCP {
+    Add-DHCPServerv4Scope -Name "MyCorp" -StartRange "10.0.0.100" -EndRange "10.0.0.200" -SubnetMask "255.255.255.0" -State Active
+    Set-DHCPServerv4Scope -ScopeId "10.0.0.0" -LeaseDuration "1.00:00:00"
+    Set-DHCPServerv4OptionValue -ScopeID "10.0.0.0" -DNSDomain "my.corp" -DNSServer "10.0.0.1" -Router "10.0.0.1"
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\ServerManager\Roles\12" –Name ConfigurationState –Value 2
+    Restart-Service dhcpserver}
+Function Install.NATRouting {
+    Install-RemoteAccess -VpnType RoutingOnly -PassThru
+    Net Stop remoteAccess
+    Netsh Routing IP NAT Install
+    Netsh Routing IP NAT Add Interface "Extern-NIC"
+    Netsh Routing IP NAT Add Interface "Intern-NIC"
+    Netsh Routing IP NAT Set Interface "Extern-NIC" Mode=Full
+    Net Start RemoteAccess}
+# Prerequisites: 
+# 1) A fresh installation of Windows Server  (Core or DesktopExperience). Mind your Admin password. 
+# 2) A fully updated Server
+# 3) Make the needed changes in this script    
+# Part I: Load lines 1 to 19 in PowerShell and then execute line 47
+Customize.Server; Autostart.PowerShellServerCore; Set.Pagefile; Rename.NIC; Set.IPAddress; Disable.IPv6; Disable.NetBios; Disable.WINS; Update.NTP; Disable.Telemetry; Install.ServerFeatures; Rename.Server
+#Wait for Reboot!
+# Part II: Load lines 20 to 41 in PowerSehll and then execute line 50 
+Config.DNS; Config.DHCP; Install.NATRouting
